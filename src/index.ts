@@ -1,6 +1,5 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
@@ -22,117 +21,39 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Типы
-interface TelegramInitData {
-  user?: {
-    id: number;
-    is_bot: boolean;
-    first_name: string;
-    last_name?: string;
-    username?: string;
-    language_code?: string;
-    is_premium?: boolean;
-  };
-  auth_date: number;
-  hash: string;
-}
-
-// Функция для проверки подписи Telegram
-function verifyTelegramWebAppData(initData: string, botToken: string): { valid: boolean; data?: TelegramInitData } {
-  try {
-    const params = new URLSearchParams(initData);
-    const hash = params.get('hash');
-
-    if (!hash) {
-      return { valid: false };
-    }
-
-    // Создаём строку для проверки
-    const dataCheckString = Array.from(params.entries())
-      .filter(([key]) => key !== 'hash')
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n');
-
-    // Вычисляем хеш
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(botToken)
-      .digest();
-
-    const computedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
-    const isValid = computedHash === hash;
-
-    if (isValid) {
-      const data: TelegramInitData = {
-        hash: hash,
-        auth_date: parseInt(params.get('auth_date') || '0'),
-      };
-
-      const userStr = params.get('user');
-      if (userStr) {
-        data.user = JSON.parse(userStr);
-      }
-
-      return { valid: true, data };
-    }
-
-    return { valid: false };
-  } catch (error) {
-    console.error('Error verifying Telegram data:', error);
-    return { valid: false };
-  }
-}
-
-// Эндпоинт для аутентификации
+// Эндпоинт для простой аутентификации по Telegram ID
+// Версия без проверки подписи - просто создаём/получаем пользователя по ID
 app.post('/api/auth/telegram', async (req: Request, res: Response) => {
   try {
-    const { initData } = req.body;
+    const { user_id, first_name, last_name, username } = req.body;
 
-    if (!initData) {
-      return res.status(400).json({ error: 'initData is required' });
+    // Проверяем что передан user_id
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
     }
 
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    if (!botToken) {
-      return res.status(500).json({ error: 'Bot token not configured' });
-    }
-
-    // Проверяем подпись
-    const { valid, data } = verifyTelegramWebAppData(initData, botToken);
-
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid Telegram signature' });
-    }
-
-    if (!data?.user) {
-      return res.status(400).json({ error: 'User data not found' });
-    }
-
-    const telegramUser = data.user;
+    console.log(`🔐 Auth request for Telegram user: ${user_id} (${first_name})`);
 
     // Создаём или получаем пользователя в Supabase
     const { data: existingUser, error: fetchError } = await supabase
       .from('users')
       .select('*')
-      .eq('telegram_id', telegramUser.id)
+      .eq('telegram_id', user_id)
       .single();
 
     let user = existingUser;
 
     if (fetchError && fetchError.code === 'PGRST116') {
       // Пользователя нет, создаём нового
+      console.log(`👤 Creating new user: ${user_id}`);
+
       const { data: newUser, error: createError } = await supabase
         .from('users')
         .insert({
-          telegram_id: telegramUser.id,
-          first_name: telegramUser.first_name,
-          last_name: telegramUser.last_name,
-          username: telegramUser.username,
+          telegram_id: user_id,
+          first_name: first_name || 'User',
+          last_name: last_name || null,
+          username: username || null,
         })
         .select()
         .single();
@@ -154,16 +75,20 @@ app.post('/api/auth/telegram', async (req: Request, res: Response) => {
           date_format: 'DD.MM.YYYY',
           theme: 'light',
         });
+
+      console.log(`✅ User created: ${user.id}`);
     } else if (fetchError) {
       console.error('Error fetching user:', fetchError);
       return res.status(500).json({ error: 'Failed to fetch user' });
+    } else {
+      console.log(`✅ User found: ${user.id}`);
     }
 
     // Создаём JWT токен для фронтенда (базовый, без библиотеки)
     const token = Buffer.from(
       JSON.stringify({
         sub: user.id,
-        telegram_id: telegramUser.id,
+        telegram_id: user_id,
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60, // 7 дней
       })
