@@ -60,13 +60,13 @@ app.post('/api/auth/telegram', async (req: Request, res: Response) => {
 
       if (createError) {
         console.error('Error creating user:', createError);
-        return res.status(500).json({ error: 'Failed to create user' });
+        return res.status(500).json({ error: `Failed to create user: ${createError.message}` });
       }
 
       user = newUser;
 
       // Создаём дефолтные настройки пользователя
-      await supabase
+      const { error: settingsError } = await supabase
         .from('user_settings')
         .insert({
           user_id: user.id,
@@ -76,10 +76,15 @@ app.post('/api/auth/telegram', async (req: Request, res: Response) => {
           theme: 'light',
         });
 
+      if (settingsError) {
+        console.warn('Warning: Failed to create user settings:', settingsError);
+        // Don't fail if settings creation fails
+      }
+
       console.log(`✅ User created: ${user.id}`);
     } else if (fetchError) {
       console.error('Error fetching user:', fetchError);
-      return res.status(500).json({ error: 'Failed to fetch user' });
+      return res.status(500).json({ error: `Failed to fetch user: ${fetchError.message} (Code: ${fetchError.code})` });
     } else {
       console.log(`✅ User found: ${user.id}`);
     }
