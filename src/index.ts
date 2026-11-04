@@ -16,10 +16,30 @@ const supabase = createClient(
 
 // Middleware
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: ['https://timesushist.vercel.app', 'http://localhost:5173', 'http://localhost:3000'],
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path}`, {
+    origin: req.get('origin'),
+    host: req.get('host'),
+  });
+  next();
+});
+
+// Health check
+app.get('/api/health', (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    supabase: process.env.SUPABASE_URL ? 'configured' : 'not configured'
+  });
+});
 
 // Эндпоинт для простой аутентификации по Telegram ID
 // Версия без проверки подписи - просто создаём/получаем пользователя по ID
