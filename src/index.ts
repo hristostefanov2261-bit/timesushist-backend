@@ -37,93 +37,70 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    supabase: process.env.SUPABASE_URL ? 'configured' : 'not configured'
+    supabase: process.env.SUPABASE_URL ? 'configured' : 'not configured',
   });
 });
 
-// Эндпоинт для простой аутентификации по Telegram ID
-// Версия без проверки подписи - просто создаём/получаем пользователя по ID
-app.post('/api/auth/telegram', async (req: Request, res: Response) => {
+// Генерация 6-значного кода и создание пользователя
+app.post('/api/auth/generate', async (req: Request, res: Response) => {
   try {
-    const { user_id, first_name, last_name, username } = req.body;
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // Проверяем что передан user_id
-    if (!user_id) {
-      return res.status(400).json({ error: 'user_id is required' });
-    }
-
-    console.log(`🔐 Auth request for Telegram user: ${user_id} (${first_name})`);
-
-    // Создаём или получаем пользователя в Supabase
-    const { data: existingUser, error: fetchError } = await supabase
+    // Проверяем, что код не занят
+    const { data: existing } = await supabase
       .from('users')
-      .select('*')
-      .eq('telegram_id', user_id)
+      .select('id')
+      .eq('code', code)
       .single();
 
-    let user = existingUser;
-
-    if (fetchError && fetchError.code === 'PGRST116') {
-      // Пользователя нет, создаём нового
-      console.log(`👤 Creating new user: ${user_id}`);
-
-      const { data: newUser, error: createError } = await supabase
-        .from('users')
-        .insert({
-          telegram_id: user_id,
-          first_name: first_name || 'User',
-          last_name: last_name || null,
-          username: username || null,
-        })
-        .select()
-        .single();
-
-      if (createError) {
-        console.error('Error creating user:', createError);
-        return res.status(500).json({ error: `Failed to create user: ${createError.message}` });
-      }
-
-      user = newUser;
-
-      // Создаём дефолтные настройки пользователя
-      const { error: settingsError } = await supabase
-        .from('user_settings')
-        .insert({
-          user_id: user.id,
-          hourly_rate: 15,
-          currency: 'PLN',
-          date_format: 'DD.MM.YYYY',
-          theme: 'light',
-        });
-
-      if (settingsError) {
-        console.warn('Warning: Failed to create user settings:', settingsError);
-        // Don't fail if settings creation fails
-      }
-
-      console.log(`✅ User created: ${user.id}`);
-    } else if (fetchError) {
-      console.error('Error fetching user:', fetchError);
-      return res.status(500).json({ error: `Failed to fetch user: ${fetchError.message} (Code: ${fetchError.code})` });
-    } else {
-      console.log(`✅ User found: ${user.id}`);
+    if (existing) {
+      return res.status(409).json({ error: 'Код занят, попробуйте снова' });
     }
 
-    // Создаём JWT токен для фронтенда (базовый, без библиотеки)
+    // Создаём пользователя
+    const { data: user, error: createError } = await supabase
+      .from('users')
+      .insert({
+        code,
+        first_name: 'Пользователь',
+        last_name: null,
+        username: null,
+      })
+      .select()
+      .single();
+
+    if (createError) {
+      console.error('Error creating user:', createError);
+      return res.status(500).json({ error: `Failed to create user: ${createError.message}` });
+    }
+
+    // Создаём дефолтные настройки пользователя
+    await supabase
+      .from('user_settings')
+      .insert({
+        user_id: user.id,
+        hourly_rate: 15,
+        currency: 'PLN',
+        date_format: 'DD.MM.YYYY',
+        theme: 'light',
+      });
+
+    // Базовый JWT-like токен
     const token = Buffer.from(
       JSON.stringify({
         sub: user.id,
-        telegram_id: user_id,
+        code,
         iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60, // 7 дней
+        exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
       })
     ).toString('base64');
 
     res.json({
       success: true,
+      code,
       user: {
         id: user.id,
-        telegram_id: user.telegram_id,
+        code: user.code,
         first_name: user.first_name,
         last_name: user.last_name,
         username: user.username,
@@ -131,12 +108,85 @@ app.post('/api/auth/telegram', async (req: Request, res: Response) => {
       token,
     });
   } catch (error) {
-    console.error('Auth error:', error);
+    console.error('Generate code error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Эндпоинт для получения пользователя (если уже аутентифицирован)
+// Проверка кода → возврат пользователя и токена
+app.post('/api/auth/verify', async (req: Request, res: Response) => {
+  try {
+    const { code } = req.body;
+
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Код должен содержать 6 цифр' });
+    }
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('code', code)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: 'Неверный код' });
+    }
+
+    const token = Buffer.from(
+      JSON.stringify({
+        sub: user.id,
+        code: user.code,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+      })
+    ).toString('base64');
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        code: user.code,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        username: user.username,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error('Verify error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Получение пользователя по коду (для веб-сайта)
+app.get('/api/user/:code', async (req: Request, res: Response) => {
+  try {
+    const { code } = req.params;
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('code', code)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    res.json({
+      id: user.id,
+      code: user.code,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      username: user.username,
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Эндпоинт для получения пользователя (если уже аутентифицирован по токену)
 app.get('/api/user', async (req: Request, res: Response) => {
   try {
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -167,11 +217,6 @@ app.get('/api/user', async (req: Request, res: Response) => {
     console.error('Error fetching user:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
-
-// Health check
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Запуск сервера
