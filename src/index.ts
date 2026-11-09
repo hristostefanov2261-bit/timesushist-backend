@@ -32,6 +32,19 @@ app.use((req, res, next) => {
   next();
 });
 
+// Debug env (временный, удалить после проверки)
+app.get('/api/debug-env', (req: Request, res: Response) => {
+  const url = process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  res.json({
+    supabase_url_present: !!url,
+    supabase_url_prefix: url.slice(0, 30),
+    key_present: !!key,
+    key_prefix: key.slice(0, 10),
+    node_env: process.env.NODE_ENV,
+  });
+});
+
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
